@@ -51,6 +51,10 @@
 
 #define LED_BUILTIN_Pin GPIO_PIN_13
 #define LED_BUILTIN_GPIO_Port GPIOC
+#define SERVO_ROLL_Pin GPIO_PIN_0
+#define SERVO_ROLL_GPIO_Port GPIOA
+#define SERVO_PITCH_Pin GPIO_PIN_1
+#define SERVO_PITCH_GPIO_Port GPIOA
 
 /* ########################## Assert Selection ############################## */
 /**
