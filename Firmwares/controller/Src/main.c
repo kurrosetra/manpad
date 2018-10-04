@@ -42,7 +42,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdlib.h>
-#include <arm_math.h>
+//#include <arm_math.h>
 
 #include "MPU6050_register.h"
 #include "tm_stm32_ahrs_imu.h"
@@ -65,9 +65,11 @@ UART_HandleTypeDef huart2;
 /* TODO Private Variables here */
 #define DEBUG								1
 #if DEBUG
-#define IMU_DEBUG							0
-#define SERVO_DEBUG							0
+#define IMU_DEBUG							1
+#define SERVO_DEBUG							1
 #define MANPAD_DEBUG						1
+
+char vt100_home[16];
 #endif	//if DEBUG
 
 #define UART_BUFSIZE						1024
@@ -77,6 +79,14 @@ char tx1Data[UART_BUFSIZE];
 char tx2Data[UART_BUFSIZE];
 #endif	//if DEBUG
 
+typedef struct
+{
+	char buffer[UART_BUFSIZE];
+	volatile uint16_t head;
+	volatile uint16_t tail;
+	uint16_t size;
+} Ring_Buffer_t;
+
 /* Private Variables for MPU6050 */
 #define MPU6050_ADDRESS						0xD0
 #define MPU6050_DATA_SIZE					14
@@ -85,7 +95,6 @@ char tx2Data[UART_BUFSIZE];
 
 uint8_t imuData[MPU6050_DATA_SIZE];
 volatile uint8_t imuDataUpdated = 0;
-volatile uint8_t mpuState = 0;
 volatile FlagStatus finDataUpdate = 0;
 #if IMU_DEBUG
 volatile uint16_t counter = 0;
@@ -118,10 +127,10 @@ typedef struct _MP_ODROID_DATA_t
 } MP_ODROID_DATA_t;
 MP_ODROID_DATA_t MP_ODROID_INPUT = { 0.0f, 0.0f, 0.0f };
 uint32_t odroid_last_command_timer = 0;
-char rxBuffer[UART_BUFSIZE];
+//char rxBuffer[UART_BUFSIZE];
+Ring_Buffer_t rxBuffer = { { 0 }, 0, 0, UART_BUFSIZE };
 volatile FlagStatus new_data = RESET;
 volatile ITStatus usart1RxReady = RESET;
-volatile uint16_t uart1RxLength = 0;
 
 /* Private Variables for SERVO */
 typedef enum
@@ -179,8 +188,12 @@ static void pidUpdate();
 static void finSendCommand();
 
 static void gravityCompensateAcc(TM_AHRSIMU_t *ahrs, MPU6050_DATATYPE *acc);
-static size_t map(size_t x, size_t in_min, size_t in_max, size_t out_min, size_t out_max);
+static int map(int x, int in_min, int in_max, int out_min, int out_max);
 static void MPU_Init();
+
+void ring_buffer_write(Ring_Buffer_t *buffer, char c);
+char ring_buffer_read(Ring_Buffer_t *buffer);
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);
 
 /* USER CODE END PFP */
@@ -197,6 +210,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);
 int main(void)
 {
 	/* USER CODE BEGIN 1 */
+	int strLength = 0;
+
+#if DEBUG
+	sprintf(vt100_home, "\x1b[2J\x1b[H");
+#endif	//if DEBUG
 
 	/* USER CODE END 1 */
 
@@ -229,8 +247,7 @@ int main(void)
 
 #if DEBUG
 	/* clear vt100 screen & put cursor to home position (upper left) */
-	sprintf(tx2Data, "\x1b[2J\x1b[H");
-	HAL_UART_Transmit(&huart2, (uint8_t *) tx2Data, strlen(tx2Data), 10);
+	HAL_UART_Transmit(&huart2, (uint8_t *) vt100_home, strlen(vt100_home), 10);
 #endif	//if DEBUG
 
 	/* MPU init */
@@ -250,11 +267,15 @@ int main(void)
 
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
 	HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
-	//servo ROLL & pitch zero
-	SERVO_set_position(90, 90);
+	//servo ROLL & pitch center
+	servoRollAngle = 90;
+	servoPitchAngle = 90;
+
+	SERVO_set_position(servoRollAngle, servoPitchAngle);
+
 	// fin zero
-	sprintf(tx1Data, "$CMD,0.0,0.0*");
-	HAL_UART_Transmit(&huart1, (uint8_t*) tx1Data, strlen(tx1Data), 10);
+	strLength = sprintf(tx1Data, "$CMD,0.0,0.0*");
+	HAL_UART_Transmit(&huart1, (uint8_t*) tx1Data, (uint16_t) strLength, 10);
 
 	/* PID timer */
 	HAL_TIM_Base_Start_IT(&htim2);
@@ -271,9 +292,14 @@ int main(void)
 	uint32_t millis = 0;
 	int16_t a[3], g[3];
 	char cmdIn[UART_BUFSIZE];
+	uint8_t startSaveBuffer = 0;
+	uint16_t cmdInIndex = 0;
+	char c;
 
-#if IMU_DEBUG
+#if DEBUG
 	uint32_t updateTimer = 0;
+	char tmpStr[UART_BUFSIZE];
+	uint32_t UPDATE_TIMEOUT = 500;
 #endif	//if IMU_DEBUG
 
 	while (1)
@@ -284,40 +310,67 @@ int main(void)
 		/* USER CODE BEGIN 3 */
 		/* TODO Begin loop */
 		millis = HAL_GetTick();
-#if IMU_DEBUG
+#if DEBUG
 		if (millis >= updateTimer)
 		{
-			updateTimer = millis + 1000;
-
-			HAL_UART_Transmit(&huart2, (uint8_t *) tx2Data, strlen(tx2Data), 10);
+			updateTimer = millis + UPDATE_TIMEOUT;
 
 			MPU6050_DATATYPE accTem = acc;
 			gravityCompensateAcc(&ahrsImu, &accTem);
-			sprintf(tx1Data,
-					"counter;err= %d;%d\r\n\tYPR= %.3f %.3f %.3f\r\n\tacc= %.3f %.3f %.3f\r\n\taccTem= %.3f %.3f %.3f\r\n\tgyro= %.3f %.3f %.3f\r\n",
-					counter, errCounter, ahrsImu.Yaw, ahrsImu.Pitch, ahrsImu.Roll, acc.x, acc.y,
-					acc.z, accTem.x, accTem.y, accTem.z, gyro.x, gyro.y, gyro.z);
+#if IMU_DEBUG
+			strLength = sprintf(tx2Data,
+					"%scounter;err= %d;%d\r\nIMU_ROLL= %.3f\tZaccGra= %.3f\r\n", vt100_home,
+					(int) (((uint32_t) counter * 1000) / UPDATE_TIMEOUT), errCounter, ahrsImu.Roll,
+					accTem.z);
+#endif	//if IMU_DEBUG
+#if SERVO_DEBUG
+#if IMU_DEBUG
+			memcpy(tmpStr, tx2Data, UART_BUFSIZE);
+			strLength = sprintf(tx2Data,
+					"%sODROID= %.3f,%.3f,%.3f\r\nservoAngle=%i %i\r\nXcom=%.3f,%.3f\r\n", tmpStr,
+					MP_ODROID_INPUT.sigYZ, MP_ODROID_INPUT.roll, MP_ODROID_INPUT.pitch,
+					servoRollAngle, servoPitchAngle, AyzCom, rollCom);
+#else
+			strLength = sprintf(tx2Data,
+					"INPUT= %.3f,%.3f,%.3f\r\nservo=%i %i\r\nfin=%.3f,%.3f\r\n",
+					MP_ODROID_INPUT.sigYZ, MP_ODROID_INPUT.roll, MP_ODROID_INPUT.pitch,
+					servoRollAngle, servoPitchAngle, AyzCom, rollCom);
+#endif	//if IMU_DEBUG
+#endif	//if SERVO_DEBUG
+#if MANPAD_DEBUG
+#if (IMU_DEBUG==1)||(SERVO_DEBUG==1)
+			memcpy(tmpStr, tx2Data, UART_BUFSIZE);
+			strLength = sprintf(tx2Data,
+//					"%sgainCom= %.2f %.2f\r\ngainImu= %.2f %.2f\r\n$CMD,%.2f,%.2f*\r\n", tmpStr,
+					"%s%s\r\n$CMD,%.2f,%.2f*\r\n", tmpStr, cmdIn, zPID.output, rPID.output);
+#else
+			strLength = sprintf(tx2Data, "$CMD,%.2f,%.2f*", zPID.output, rPID.output);
+#endif	//if (IMU_DEBUG==1)||(SERVO_DEBUG==1)
+#endif	//if MANPAD_DEBUG
 
 			counter = 0;
 			errCounter = 0;
-			HAL_UART_Transmit_IT(&huart2, (uint8_t *) tx1Data, strlen(tx1Data));
+			HAL_UART_Transmit_IT(&huart2, (uint8_t *) tx2Data, (uint16_t) strLength);
 		}
-#endif	//if IMU_DEBUG
+#endif	//if DEBUG
 
 		if (odroid_last_command_timer && millis >= odroid_last_command_timer)
 		{
 			odroid_last_command_timer = 0;
 
-			SERVO_set_position(90, 90);
+			servoRollAngle = 90;
+			servoPitchAngle = 90;
+			SERVO_set_position(servoRollAngle, servoPitchAngle);
 
 			MP_ODROID_INPUT.sigYZ = 0.0f;
 			MP_ODROID_INPUT.roll = 0.0f;
 			MP_ODROID_INPUT.pitch = 0.0f;
+			AyzCom = 0.0f;
+			rollCom = 0.0f;
 		}
 
 		if (imuDataUpdated)
 		{
-			mpuState = 1;
 			imuDataUpdated = 0;
 #if IMU_DEBUG
 			counter++;
@@ -332,7 +385,6 @@ int main(void)
 			g[0] = ((int16_t) imuData[8] << 8 | imuData[9]);
 			g[1] = ((int16_t) imuData[10] << 8 | imuData[11]);
 			g[2] = ((int16_t) imuData[12] << 8 | imuData[13]);
-			mpuState = 0;
 
 			/* convert data */
 			acc.x = (float) a[0] / 2048.0f;
@@ -353,18 +405,38 @@ int main(void)
 			finDataUpdate = RESET;
 
 			if (zPID.mode == AUTOMATIC && rPID.mode == AUTOMATIC)
-			{
 				pidUpdate();
-				/* send data to fin */
-				finSendCommand();
+			else
+			{
+				zPID.output = 0;
+				rPID.output = 0;
 			}
+			/* send data to fin */
+			finSendCommand();
 		}
 
 		if (usart1RxReady == SET)
 		{
-			HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
+			LED_BUILTIN_GPIO_Port->ODR ^= LED_BUILTIN_Pin;
 
-			memcpy(cmdIn, rxBuffer, UART_BUFSIZE);
+			while (rxBuffer.head != rxBuffer.tail)
+			{
+				c = ring_buffer_read(&rxBuffer);
+				if (c == CMD_HEADER_CHAR)
+				{
+					memset(cmdIn, 0, UART_BUFSIZE);
+					startSaveBuffer = 1;
+					cmdInIndex = 0;
+				}
+				if (startSaveBuffer)
+				{
+					cmdIn[cmdInIndex++] = c;
+					if ((c == CMD_DATA_TERMINATOR_CHAR) || (c == CMD_SERVO_PARAM_TERMINATOR_CHAR)
+							|| (c == CMD_FIN_PARAM_TERMINATOR_CHAR))
+						break;
+				}
+			}
+			usart1RxReady = RESET;
 
 			if (new_data == SET)
 			{
@@ -387,12 +459,6 @@ int main(void)
 
 					odroid_last_command_timer = millis + CMD_DATA_TIMEOUT;
 
-#if SERVO_DEBUG
-					sprintf(tx2Data, "INPUT= %.3f,%.3f,%.3f\r\nservo=%i %i\r\nfin=%.3f,%.3f\r\n",MP_ODROID_INPUT.sigYZ, MP_ODROID_INPUT.roll,
-							MP_ODROID_INPUT.pitch, servoRollAngle, servoPitchAngle, AyzCom, rollCom);
-					HAL_UART_Transmit_IT(&huart2, (uint8_t*) tx2Data, strlen(tx2Data));
-#endif	//if SERVO_DEBUG
-
 				}
 			}
 			else if (servo_new_param == SET)
@@ -405,8 +471,6 @@ int main(void)
 				MP_Parsing_Fin_Param(cmdIn);
 				fin_new_param = RESET;
 			}
-
-			usart1RxReady = RESET;
 		}
 
 		/* TODO End Loop */
@@ -689,13 +753,8 @@ static void MX_GPIO_Init(void)
 /* TODO non-hardware functions related*/
 static void finSendCommand()
 {
-	sprintf(tx1Data, "$CMD,%.2f,%.2f*", zPID.output, rPID.output);
-	HAL_UART_Transmit_IT(&huart1, (uint8_t*) tx1Data, strlen(tx1Data));
-#if MANPAD_DEBUG
-	char buf[UART_BUFSIZE];
-	sprintf(buf, "\x1b[2J\x1b[H%s", tx1Data);
-	HAL_UART_Transmit_IT(&huart2, (uint8_t *) buf, strlen(buf));
-#endif	//if MANPAD_DEBUG
+	uint16_t strLength = sprintf(tx1Data, "$CMD,%.2f,%.2f*", zPID.output, rPID.output);
+	HAL_UART_Transmit_IT(&huart1, (uint8_t*) tx1Data, strLength);
 }
 
 static void pidInit()
@@ -749,6 +808,11 @@ static void MP_Parsing_Fin_Param(char *buf)
 	char tem[constVal];
 	char *pointer = buf;
 	uint16_t a, i, pos;
+	uint8_t error = 0;
+	float ZpidTem[3];
+	float RpidTem[3];
+	float gainImuTem[2];
+	float gainComTem[2];
 
 	/* Z_PID */
 	for ( a = 0; a < 3; a++ )
@@ -763,7 +827,10 @@ static void MP_Parsing_Fin_Param(char *buf)
 			else
 				break;
 		}
-		Zpid[a] = atof(tem);
+		if (i < pos)
+			ZpidTem[a] = atof(tem);
+		else
+			error = 1;
 	}
 
 	/* R_PID */
@@ -779,7 +846,10 @@ static void MP_Parsing_Fin_Param(char *buf)
 			else
 				break;
 		}
-		Rpid[a] = atof(tem);
+		if (i < pos)
+			RpidTem[a] = atof(tem);
+		else
+			error = 1;
 	}
 
 	/* gainImu	=	 gainAzImu	&	gainAyImu */
@@ -795,7 +865,10 @@ static void MP_Parsing_Fin_Param(char *buf)
 			else
 				break;
 		}
-		gainImu[a] = atof(tem);
+		if (i < pos)
+			gainImuTem[a] = atof(tem);
+		else
+			error = 1;
 	}
 
 	/* gainCom[0]	=	gainAzCom */
@@ -809,7 +882,10 @@ static void MP_Parsing_Fin_Param(char *buf)
 		else
 			break;
 	}
-	gainCom[0] = atof(tem);
+	if (i < pos)
+		gainComTem[0] = atof(tem);
+	else
+		error = 1;
 
 	/* gainCom[1]	=	gainAyCom */
 	pointer++;
@@ -822,8 +898,25 @@ static void MP_Parsing_Fin_Param(char *buf)
 		else
 			break;
 	}
-	gainCom[1] = atof(tem);
+	if (i < pos)
+		gainComTem[1] = atof(tem);
+	else
+		error = 1;
 
+	if (error == 0)
+	{
+		for ( int i = 0; i < 3; i++ )
+		{
+			Zpid[i] = ZpidTem[i];
+			Rpid[i] = RpidTem[i];
+		}
+
+		for ( int i = 0; i < 2; i++ )
+		{
+			gainImu[i] = gainImuTem[i];
+			gainCom[i] = gainComTem[i];
+		}
+	}
 }
 
 static void MP_Parsing_Servo_Param(char *buf)
@@ -889,6 +982,9 @@ static void MP_Parsing_Servo_Param(char *buf)
 	slew[1] = atoi(tem);
 
 	SV_setParameter(gain, slew);
+	servoRollAngle = 90;
+	servoPitchAngle = 90;
+	SERVO_set_position(servoRollAngle, servoPitchAngle);
 }
 
 static uint8_t MP_Parsing_Data(char *buf)
@@ -898,6 +994,8 @@ static uint8_t MP_Parsing_Data(char *buf)
 	char *pointer = buf;
 	uint16_t i;
 	uint16_t pos;
+	float sigYZ = 0.0f, roll = 0.0f, pitch = 0.0f;
+	uint8_t error = 0;
 
 	/*
 	 * author miftakur
@@ -919,9 +1017,9 @@ static uint8_t MP_Parsing_Data(char *buf)
 			break;
 	}
 	/* not found */
-	if (i == pos)
-		return 0;
-	MP_ODROID_INPUT.sigYZ = atof(fTem);
+	if (i >= pos)
+		error = 1;
+	sigYZ = atof(fTem);
 
 	/* MP_ODROID_INPUT.roll */
 	pointer++;
@@ -935,9 +1033,9 @@ static uint8_t MP_Parsing_Data(char *buf)
 			break;
 	}
 	/* not found */
-	if (i == pos)
+	if (i >= pos)
 		return 0;
-	MP_ODROID_INPUT.roll = atof(fTem);
+	roll = atof(fTem);
 
 	/* MP_ODROID_INPUT.pitch */
 	pointer++;
@@ -951,11 +1049,21 @@ static uint8_t MP_Parsing_Data(char *buf)
 			break;
 	}
 	/* not found */
-	if (i == pos)
-		return 0;
-	MP_ODROID_INPUT.pitch = atof(fTem);
+	if (i >= pos)
+		error = 1;
+	pitch = atof(fTem);
 
-	return 1;
+	if (error == 0)
+	{
+		MP_ODROID_INPUT.sigYZ = sigYZ;
+		MP_ODROID_INPUT.roll = roll;
+		MP_ODROID_INPUT.pitch = pitch;
+		return 1;
+	}
+	else
+		errCounter++;
+
+	return 0;
 }
 
 static void gravityCompensateAcc(TM_AHRSIMU_t *ahrs, MPU6050_DATATYPE *acc)
@@ -975,9 +1083,33 @@ static void gravityCompensateAcc(TM_AHRSIMU_t *ahrs, MPU6050_DATATYPE *acc)
 
 }
 
-static size_t map(size_t x, size_t in_min, size_t in_max, size_t out_min, size_t out_max)
+static int map(int x, int in_min, int in_max, int out_min, int out_max)
 {
 	return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void ring_buffer_write(Ring_Buffer_t *buffer, char c)
+{
+	uint16_t i = (buffer->head + 1) % buffer->size;
+
+	if (i != buffer->tail)
+	{
+		buffer->buffer[buffer->head] = c;
+		buffer->head = i;
+	}
+}
+
+char ring_buffer_read(Ring_Buffer_t *buffer)
+{
+	if (buffer->head == buffer->tail)
+		return -1;
+	else
+	{
+		char c = buffer->buffer[buffer->tail];
+		buffer->tail = (buffer->tail + 1) % buffer->size;
+
+		return c;
+	}
 }
 
 /* TODO hardware functions related*/
@@ -985,18 +1117,15 @@ static size_t map(size_t x, size_t in_min, size_t in_max, size_t out_min, size_t
 void usart1_callback_IT()
 {
 	uint32_t isrflags = READ_REG(huart1.Instance->SR);
+	uint32_t cr1its = READ_REG(huart1.Instance->CR1);
 	char c;
 
 	/* RXNE handler */
 	if ((isrflags & USART_SR_RXNE) != RESET)
 	{
-		c = (char) (huart1.Instance->DR & (uint8_t) 0x00FF);
-		if (c == CMD_HEADER_CHAR)
-		{
-			memset(rxBuffer, 0, UART_BUFSIZE);
-			uart1RxLength = 0;
-		}
-		else if (c == CMD_DATA_TERMINATOR_CHAR)
+		c = (char) (huart1.Instance->DR & 0xFF);
+
+		if (c == CMD_DATA_TERMINATOR_CHAR)
 		{
 			new_data = SET;
 			usart1RxReady = SET;
@@ -1012,7 +1141,37 @@ void usart1_callback_IT()
 			usart1RxReady = SET;
 		}
 
-		rxBuffer[uart1RxLength++] = c;
+		ring_buffer_write(&rxBuffer, c);
+	}
+
+	/* UART in mode Transmitter ------------------------------------------------*/
+	if (((isrflags & USART_SR_TXE) != RESET) && ((cr1its & USART_CR1_TXEIE) != RESET))
+	{
+		/* Check that a Tx process is ongoing */
+		if (huart1.gState == HAL_UART_STATE_BUSY_TX)
+		{
+			huart1.Instance->DR = (uint8_t) (*huart1.pTxBuffPtr++ & (uint8_t) 0x00FF);
+
+			if (--huart1.TxXferCount == 0U)
+			{
+				/* Disable the UART Transmit Complete Interrupt */
+				__HAL_UART_DISABLE_IT(&huart1, UART_IT_TXE);
+
+				/* Enable the UART Transmit Complete Interrupt */
+				__HAL_UART_ENABLE_IT(&huart1, UART_IT_TC);
+			}
+		}
+	}
+
+	/* UART in mode Transmitter end --------------------------------------------*/
+	if (((isrflags & USART_SR_TC) != RESET) && ((cr1its & USART_CR1_TCIE) != RESET))
+	{
+		/* Disable the UART Transmit Complete Interrupt */
+		__HAL_UART_DISABLE_IT(&huart1, UART_IT_TC);
+
+		/* Tx process is ended, restore huart->gState to Ready */
+		huart1.gState = HAL_UART_STATE_READY;
+		//		HAL_UART_TxCpltCallback(huart1);
 	}
 
 	/* ------------------------------------------------------------ */
@@ -1029,24 +1188,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 	if (htim->Instance == TIM3)
 	{
-		if (mpuState == 0)
-		{
-			/* start retrieve imu data */
+		/* start retrieve imu data */
 #if IMU_DEBUG
-			if (HAL_I2C_Mem_Read_DMA(&hi2c1, MPU6050_ADDRESS, MPU6050_ACCEL_XOUT_H,
-							I2C_MEMADD_SIZE_8BIT, imuData, MPU6050_DATA_SIZE) != HAL_OK)
+		if (HAL_I2C_Mem_Read_DMA(&hi2c1, MPU6050_ADDRESS, MPU6050_ACCEL_XOUT_H,
+		I2C_MEMADD_SIZE_8BIT, imuData, MPU6050_DATA_SIZE) != HAL_OK)
 			errCounter++;
 #else
-			HAL_I2C_Mem_Read_DMA(&hi2c1, MPU6050_ADDRESS, MPU6050_ACCEL_XOUT_H,
-			I2C_MEMADD_SIZE_8BIT, imuData, MPU6050_DATA_SIZE);
+		HAL_I2C_Mem_Read_DMA(&hi2c1, MPU6050_ADDRESS, MPU6050_ACCEL_XOUT_H,
+				I2C_MEMADD_SIZE_8BIT, imuData, MPU6050_DATA_SIZE);
 
 #endif	//if IMU_DEBUG
 
-		}
-#if IMU_DEBUG
-		else
-		errCounter++;
-#endif	//if IMU_DEBUG
 	}
 }
 
@@ -1102,15 +1254,10 @@ static void MPU_Init()
 		}
 
 #if IMU_DEBUG
-		uint8_t val[2];
-		HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDRESS, MPU6050_ACCEL_CONFIG, I2C_MEMADD_SIZE_8BIT,
-				&val[0], 1, 10);
-		HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDRESS, MPU6050_GYRO_CONFIG, I2C_MEMADD_SIZE_8BIT,
-				&val[1], 1, 10);
-		sprintf(tmpString, "%s%s%s\r\n%X %X\r\n\r\n", tmp[0], tmp[1], tmp[2], val[0], val[1]);
-		HAL_UART_Transmit_IT(&huart2, (uint8_t *) tmpString, strlen(tmpString));
+		sprintf(tmpString, "%s%s%s*\r\n\r\n", tmp[0], tmp[1], tmp[2]);
+		HAL_UART_Transmit(&huart2, (uint8_t *) tmpString, strlen(tmpString), 10);
+		HAL_Delay(1000);
 #endif	//if IMU_DEBUG
-
 	}
 
 }

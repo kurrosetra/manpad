@@ -259,11 +259,7 @@ void I2C1_EV_IRQHandler(void)
 void USART1_IRQHandler(void)
 {
   /* USER CODE BEGIN USART1_IRQn 0 */
-	uint32_t isrflags = READ_REG(huart1.Instance->SR);
-	uint32_t cr1its = READ_REG(huart1.Instance->CR1);
-
-	if ((((isrflags & USART_SR_TXE) != RESET) && ((cr1its & USART_CR1_TXEIE) != RESET))
-			|| (((isrflags & USART_SR_TC) != RESET) && ((cr1its & USART_CR1_TCIE) != RESET)))
+	if (0)
 	{
   /* USER CODE END USART1_IRQn 0 */
   HAL_UART_IRQHandler(&huart1);

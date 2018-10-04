@@ -17,10 +17,12 @@ float servo_gain[2] = { 0.5f, 0.5f };
 int servo_slew[2] = { 5, 5 };
 int rollAngle = 0;
 int pitchAngle = 0;
+float tYprev = 0.0f, tZprev = 0.0f;
 
 int SV_applySlew(int input_now, int delta, int rate_limit)
 {
-	if (rate_limit != 0) {
+	if (rate_limit != 0)
+	{
 		if (delta > rate_limit)
 			delta = rate_limit;
 		if (delta < -rate_limit)
@@ -36,6 +38,9 @@ void SV_setParameter(float *gain, int *slew)
 
 	servo_slew[0] = *slew;
 	servo_slew[1] = *(slew + 1);
+
+	tYprev = 0.0f;
+	tZprev = 0.0f;
 }
 
 void SV_calculation(int rollError, int pitchError)
@@ -62,7 +67,6 @@ void MP_Conversion(float *sigYZ, float *roll, float *AyzCom, float *rollCom)
 	float tY, tZ;
 	float deltaY, deltaZ;
 	float AyCom, AzCom;
-	static float tYprev = 0.0f, tZprev = 0.0f;
 
 	tY = *sigYZ * cos(degrees_to_radians(*roll));
 	tZ = *sigYZ * sin(degrees_to_radians(*roll));
@@ -76,11 +80,14 @@ void MP_Conversion(float *sigYZ, float *roll, float *AyzCom, float *rollCom)
 	//  AyCom = tY * gainAyCom;
 	//  AzCom = tZ * gainAzCom;
 
-	AyCom = deltaY * gainCom[1];
 	AzCom = deltaZ * gainCom[0];
+	AyCom = deltaY * gainCom[1];
 
 	*AyzCom = sqrt((AyCom * AyCom) + (AzCom * AzCom));
 	*rollCom = radians_to_degrees(atan2(AzCom, AyCom));  //arc tangen y/x
+
+//	*AyzCom = AzCom;
+//	*rollCom= AyCom;
 }
 
 float degrees_to_radians(float deg)
