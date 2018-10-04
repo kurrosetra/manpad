@@ -66,6 +66,7 @@ UART_HandleTypeDef huart1;
 #define CMD_HEADER_CHAR					'$'
 #define CMD_SEPARATOR_CHAR				','
 #define CMD_TERMINATOR_CHAR				'*'
+#define CMD_TIMEOUT						1000
 
 #define UART_BUFSIZE					1024
 
@@ -111,6 +112,7 @@ typedef struct
 MOTOR_ID_t mUp, mDown, mRight, mLeft;
 
 int16_t mCmd[2] = { 0, 0 };
+int16_t mCmdConstrain[2] = { 0, 0 };
 uint16_t mPos[4];
 
 volatile uint16_t rx1Length = 0;
@@ -232,8 +234,9 @@ int main(void)
 	uint16_t cmdInIndex = 0;
 	char c;
 
-#if DEBUG
 	uint32_t millis = 0;
+	uint32_t cmdInactiveTimer = 0;
+#if DEBUG
 	uint32_t updateTimer = 0;
 #endif	//if DEBUG
 
@@ -244,8 +247,17 @@ int main(void)
 
 		/* USER CODE BEGIN 3 */
 		/* TODO Begin Loop */
-#if DEBUG
 		millis = HAL_GetTick();
+		if (cmdInactiveTimer && millis >= cmdInactiveTimer)
+		{
+			cmdInactiveTimer = 0;
+
+			mCmd[0] = 0;
+			mCmd[1] = 0;
+			mCmdConstrain[0] = 0;
+			mCmdConstrain[1] = 0;
+		}
+#if DEBUG
 		if (millis >= updateTimer)
 		{
 			updateTimer = millis + 1000;
@@ -274,21 +286,20 @@ int main(void)
 						break;
 				}
 			}
-
-//			memcpy(cmdIn, rx1Buffer, UART_BUFSIZE);
+			rx1Ready = RESET;
 
 			/* parse incoming command */
 			if (parseCommand(cmdIn))
+			{
 				LED_BUILTIN_GPIO_Port->ODR ^= LED_BUILTIN_Pin;
-//				HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
-
-			rx1Ready = RESET;
+				cmdInactiveTimer = millis + CMD_TIMEOUT;
+			}
 		}
 
 		if (startSendLogData == SET)
 		{
 			/* update motor */
-			motorSet(mCmd[0], mCmd[1]);
+			motorSet(mCmdConstrain[0], mCmdConstrain[1]);
 
 			/* TODO re-format adcValue to degrees */
 #if DEBUG
@@ -724,7 +735,7 @@ static uint8_t parseCommand(char *buf)
 	else
 		max = mUp.pDegMax;
 
-	mCmd[0] = constrain(mCmd[0], min, max);
+	mCmdConstrain[0] = constrain(mCmd[0], min, max);
 
 	/* pitch angle */
 	if (mRight.pDegMin >= mLeft.pDegMin)
@@ -736,7 +747,7 @@ static uint8_t parseCommand(char *buf)
 	else
 		max = mRight.pDegMax;
 
-	mCmd[1] = constrain(mCmd[1], min, max);
+	mCmdConstrain[1] = constrain(mCmd[1], min, max);
 
 	return 1;
 }
