@@ -279,7 +279,8 @@ int main(void)
 
 			/* parse incoming command */
 			if (parseCommand(cmdIn))
-				HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
+				LED_BUILTIN_GPIO_Port->ODR ^= LED_BUILTIN_Pin;
+//				HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
 
 			rx1Ready = RESET;
 		}
@@ -614,7 +615,7 @@ static void MX_GPIO_Init(void)
 	GPIO_InitStruct.Pin = LED_BUILTIN_Pin;
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
 	HAL_GPIO_Init(LED_BUILTIN_GPIO_Port, &GPIO_InitStruct);
 
 	/*Configure GPIO pins : PC14 PC15 */
@@ -709,6 +710,33 @@ static uint8_t parseCommand(char *buf)
 	_f = atof(fTem);
 	mCmd[1] = (int16_t) (_f * 10);
 	mCmd[0] = roll;
+
+	/* add constrain to input */
+	int16_t min, max;
+
+	/* roll angle */
+	if (mUp.pDegMin >= mDown.pDegMin)
+		min = mUp.pDegMin;
+	else
+		min = mDown.pDegMin;
+	if (mUp.pDegMax >= mDown.pDegMax)
+		max = mDown.pDegMax;
+	else
+		max = mUp.pDegMax;
+
+	mCmd[0] = constrain(mCmd[0], min, max);
+
+	/* pitch angle */
+	if (mRight.pDegMin >= mLeft.pDegMin)
+		min = mRight.pDegMin;
+	else
+		min = mLeft.pDegMin;
+	if (mRight.pDegMax >= mLeft.pDegMax)
+		max = mLeft.pDegMax;
+	else
+		max = mRight.pDegMax;
+
+	mCmd[1] = constrain(mCmd[1], min, max);
 
 	return 1;
 }
