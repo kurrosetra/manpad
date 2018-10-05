@@ -767,7 +767,7 @@ static uint16_t mapPwm(MOTOR_ID_t *mtr, int16_t x)
 
 	x = constrain(x, inMin, inMax);
 
-	if (mtr->type == M_PITCH_LEFT)
+	if (mtr->type == M_PITCH_RIGHT)
 		x = 0 - x;
 
 	if (x < inZero)
@@ -797,7 +797,7 @@ static int16_t adcMapping(MOTOR_ID_t * mtr, uint16_t value)
 	outMin = mtr->pDegMin;
 	outMax = mtr->pDegMax;
 
-	if (mtr->type == M_PITCH_LEFT)
+	if (mtr->type == M_PITCH_RIGHT)
 	{
 		leftDiff = abs(inZero - value);
 

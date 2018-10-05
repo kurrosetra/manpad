@@ -358,6 +358,8 @@ int main(void)
 		{
 			odroid_last_command_timer = 0;
 
+			memset(cmdIn, 0, UART_BUFSIZE);
+
 			servoRollAngle = 90;
 			servoPitchAngle = 90;
 			SERVO_set_position(servoRollAngle, servoPitchAngle);

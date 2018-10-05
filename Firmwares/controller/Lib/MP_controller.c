@@ -15,8 +15,8 @@ extern float gainCom[2];
 /* Internal variables --------------------------------------------------------*/
 float servo_gain[2] = { 0.5f, 0.5f };
 int servo_slew[2] = { 5, 5 };
-int rollAngle = 0;
-int pitchAngle = 0;
+int rollAngle = 90;
+int pitchAngle = 90;
 float tYprev = 0.0f, tZprev = 0.0f;
 
 int SV_applySlew(int input_now, int delta, int rate_limit)
@@ -41,6 +41,9 @@ void SV_setParameter(float *gain, int *slew)
 
 	tYprev = 0.0f;
 	tZprev = 0.0f;
+
+	rollAngle = 90;
+	pitchAngle = 90;
 }
 
 void SV_calculation(int rollError, int pitchError)
